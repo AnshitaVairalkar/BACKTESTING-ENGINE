@@ -1,0 +1,2 @@
+Strategy,TotalPnL,AvgDailyPnL,AvgWinPnL,AvgLossPnL,MaxDrawdown,TimeToRecoveryDays,TotalTrades,WinningTrades,LosingTrades,WinRatio,LossRatio,SortinoRatio
+sensex_itm_straddle_2023_2025,4290.1,10.75,175.87,-160.83,-4452.15,,798,392,406,0.4912,0.5088,0.0652
