@@ -1,10 +1,6 @@
-import pandas as pd
-from datetime import time
-
 from data.index_reader import read_index_data
 from data.market_calendar import get_market_context
 from data.options_reader import load_option_data
-from engine.execution import execute_option_leg
 
 
 def run_event_backtest(
@@ -15,92 +11,165 @@ def run_event_backtest(
     options_parquet_root: str,
     strategy
 ):
-    """
-    Generic event-driven backtest engine.
-    Supports BOTH:
-    - Simple strategies (ITMStraddle)
-    - Stateful strategies (dynamic inventory)
-    """
-
     trades = []
+
+    # -------------------------------------------------
+    # Market context
+    # -------------------------------------------------
     market = get_market_context(calendar_csv, trade_date)
 
-    # ----------------------------
-    # Load index data
-    # ----------------------------
-    index_df = read_index_data(index_parquet_map[index], trade_date)
+    index_df = read_index_data(
+        index_parquet_map[index],
+        trade_date
+    )
 
-    # ----------------------------
-    # Strategy initialization
-    # ----------------------------
     strategy.on_day_start(
         trade_date=trade_date,
         index=index,
         market_context=market
     )
 
-    # ----------------------------
-    # Minute-by-minute loop
-    # ----------------------------
-    for ts, row in index_df.iterrows():
-        current_time = ts.time()
+    open_legs = {}
 
-        # Stop after exit time
-        if current_time > strategy.EXIT_TIME:
+    # -------------------------------------------------
+    # INTRADAY LOOP (STRICTLY < EXIT_TIME)
+    # -------------------------------------------------
+    for ts, row in index_df.iterrows():
+        candle_time = ts.time()
+
+        if candle_time >= strategy.EXIT_TIME:
             break
 
-        actions = strategy.on_minute(
-            timestamp=ts,
-            index_price=row["Close"]
-        )
+        # 🔑 INDEX PRICE = OPEN
+        index_price = row["Open"]
 
-        for action in actions:
-            if action["action"] == "ENTER":
+        actions = strategy.on_minute(ts, index_price)
+
+        for a in actions:
+
+            # ================= ENTRY =================
+            if a["action"] == "ENTER":
                 opt_df = load_option_data(
                     parquet_root=options_parquet_root,
                     trade_date=trade_date,
                     expiry=market["weekly_expiry"],
-                    strike=action["strike"],
-                    option_type=action["option_type"]
+                    strike=a["strike"],
+                    option_type=a["type"]
                 )
 
-                exec_result = execute_option_leg(
-                    df=opt_df,
-                    intended_entry_time=current_time,
-                    exit_time=strategy.EXIT_TIME,
-                    sl_pct=strategy.SL_PCT,
-                    qty=action["qty"]
+                candle = opt_df.loc[
+                    opt_df.index.time == candle_time
+                ].iloc[0]
+
+                open_legs[a["leg_id"]] = {
+                    "meta": a,
+                    "entry_price": candle["Open"],
+                    "entry_time": candle_time
+                }
+
+            # ================= EXIT =================
+            elif a["action"] == "EXIT":
+                leg = open_legs.pop(a["leg_id"])
+
+                opt_df = load_option_data(
+                    parquet_root=options_parquet_root,
+                    trade_date=trade_date,
+                    expiry=market["weekly_expiry"],
+                    strike=leg["meta"]["strike"],
+                    option_type=leg["meta"]["type"]
                 )
+
+                candle = opt_df.loc[
+                    opt_df.index.time == candle_time
+                ].iloc[0]
+
+                exit_price = candle["Open"]
+               
+                pnl= (exit_price - leg["entry_price"]) * -1
+                
+
+                # 🔍 RANGE MASKING FOR TRADESHEET
+                upper_range = leg["meta"]["upper"] if leg["meta"]["type"] == "CE" else None
+                lower_range = leg["meta"]["lower"] if leg["meta"]["type"] == "PE" else None
 
                 trades.append({
                     "DATE": trade_date,
                     "INDEX": index,
                     "EXPIRYDATE": market["weekly_expiry"].strftime("%Y-%m-%d"),
                     "DAY": market["day"],
-                    "RANGE_USED": action["range_used"],
-                    "REF_PRICE": action["ref_price"],
-                    "UPPER_RANGE": action["upper"],
-                    "LOWER_RANGE": action["lower"],
-                    "ENTRY_TIME": exec_result["entry_time"],
-                    "EXIT_TIME": exec_result["exit_time"],
-                    "INDEX_ENTRY": action["index_entry"],
-                    "INDEX_EXIT": None,
-                    "STRIKE": action["strike"],
-                    "TYPE": action["option_type"],
-                    "ENTRY_PRICE": exec_result["entry_price"],
-                    "EXIT_PRICE": exec_result["exit_price"],
-                    "QTY": action["qty"],
-                    "PNL": exec_result["pnl"],
-                    "EXIT_REASON": exec_result["exit_reason"],
+                    "RANGE_USED": leg["meta"]["R"],
+                    "INDEX_PRICE": leg["meta"]["ref_price"],
+                    "UPPER_RANGE": upper_range,
+                    "LOWER_RANGE": lower_range,
+                    "ENTRY_TIME": leg["entry_time"].strftime("%H:%M"),
+                    "EXIT_TIME": candle_time.strftime("%H:%M"),
+                    "INDEX_ENTRY": leg["meta"]["ref_price"],
+                    "INDEX_EXIT": index_price,
+                    "STRIKE": leg["meta"]["strike"],
+                    "TYPE": leg["meta"]["type"],
+                    "ENTRY_PRICE": leg["entry_price"],
+                    "EXIT_PRICE": exit_price,
+                    "QTY": -1,
+                    "PNL": pnl,
+                    "EXIT_REASON": a["reason"],
                 })
 
-            elif action["action"] == "EXIT":
-                # EXIT handled logically — execution engine already exits legs
-                pass
+    # -------------------------------------------------
+    # 🔒 EOD EXIT — EXACTLY AT EXIT_TIME (OPEN PRICE)
+    # -------------------------------------------------
+    eod_time = strategy.EXIT_TIME
 
-    # ----------------------------
-    # End of day square-off
-    # ----------------------------
-    strategy.on_day_end()
+    for leg_id, leg in open_legs.items():
+        opt_df = load_option_data(
+            parquet_root=options_parquet_root,
+            trade_date=trade_date,
+            expiry=market["weekly_expiry"],
+            strike=leg["meta"]["strike"],
+            option_type=leg["meta"]["type"]
+        )
+
+        candle = opt_df.loc[
+            opt_df.index.time == eod_time
+        ].iloc[0]
+
+        exit_price = candle["Open"]
+        pnl =(exit_price - leg["entry_price"]) * -1
+
+        # 🔍 RANGE MASKING FOR TRADESHEET
+        upper_range = leg["meta"]["upper"] if leg["meta"]["type"] == "CE" else None
+        lower_range = leg["meta"]["lower"] if leg["meta"]["type"] == "PE" else None
+
+        trades.append({
+            "DATE": trade_date,
+            "INDEX": index,
+            "EXPIRYDATE": market["weekly_expiry"].strftime("%Y-%m-%d"),
+            "DAY": market["day"],
+            "RANGE_USED": leg["meta"]["R"],
+            "REF_PRICE": leg["meta"]["ref_price"],
+            "UPPER_RANGE": upper_range,
+            "LOWER_RANGE": lower_range,
+            "ENTRY_TIME": leg["entry_time"].strftime("%H:%M"),
+            "EXIT_TIME": eod_time.strftime("%H:%M"),
+            "INDEX_ENTRY": leg["meta"]["ref_price"],
+            "INDEX_EXIT": None,
+            "STRIKE": leg["meta"]["strike"],
+            "TYPE": leg["meta"]["type"],
+            "ENTRY_PRICE": leg["entry_price"],
+            "EXIT_PRICE": exit_price,
+            "QTY": -1,
+            "PNL": pnl,
+            "EXIT_REASON": "EOD",
+        })
+
+    # -------------------------------------------------
+    # SORT TRADES: DATE → ENTRY_TIME → TYPE
+    # -------------------------------------------------
+    trades.sort(
+        key=lambda x: (
+            x["DATE"],
+            x["ENTRY_TIME"],
+            x["TYPE"]
+        )
+    )
 
     return trades
