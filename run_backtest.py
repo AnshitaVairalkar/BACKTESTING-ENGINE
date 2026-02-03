@@ -23,8 +23,8 @@ from strategy.dynamic_atm_inventory import DynamicATMInventory
 strategy = DynamicATMInventory()
 
 # 🔹 DATE RANGE
-START_DATE = "2021-06-01"
-END_DATE   = "2022-04-31"
+START_DATE = "2025-01-01"
+END_DATE   = "2025-12-31"
 
 # =================================================
 # PATHS
