@@ -3,7 +3,7 @@ from pathlib import Path
 from datetime import datetime
 
 from data.index_reader import IndexDataStore
-from data.options_reader import clear_cache, get_cache_stats
+from data.options_reader import clear_cache
 
 from engine.backtest_engine import run_multi_day_backtest
 from engine.event_backtest_engine import run_event_backtest
@@ -23,7 +23,7 @@ from strategy.dynamic_atm_inventory import DynamicATMInventory
 strategy = DynamicATMInventory()
 
 # 🔹 DATE RANGE
-START_DATE = "2025-01-01"
+START_DATE = "2021-06-01"
 END_DATE   = "2025-12-31"
 
 # =================================================
@@ -92,13 +92,14 @@ def main():
     # -------------------------------------------------
     date_suffix = f"{START_DATE}_{END_DATE}".replace("-", "")
     trades_file = OUTPUT_DIR / f"{INDEX.lower()}_{strategy_name.lower()}_{date_suffix}.csv"
+    errors_file = OUTPUT_DIR / "errors.csv"
 
     all_trades = []
+    all_errors = []
 
     # =================================================
-    # 🔀 ENGINE SWITCH
+    # ENGINE MODE
     # =================================================
-
     is_event_strategy = hasattr(strategy, "on_minute")
 
     print(
@@ -109,31 +110,41 @@ def main():
     # =================================================
     # RUN BACKTEST
     # =================================================
-
     for i, trade_date in enumerate(trading_dates, 1):
         print(f"[{i}/{len(trading_dates)}] {trade_date}")
 
-        if is_event_strategy:
-            trades = run_event_backtest(
-                trade_date=trade_date,
-                index=INDEX,
-                index_parquet_map=INDEX_PARQUET_MAP,
-                calendar_csv=str(CALENDAR_CSV_MAP[INDEX]),
-                options_parquet_root=str(OPTIONS_PARQUET_MAP[INDEX]),
-                strategy=strategy
-            )
-            all_trades.extend(trades)
+        try:
+            if is_event_strategy:
+                trades = run_event_backtest(
+                    trade_date=trade_date,
+                    index=INDEX,
+                    index_parquet_map=INDEX_PARQUET_MAP,
+                    calendar_csv=str(CALENDAR_CSV_MAP[INDEX]),
+                    options_parquet_root=str(OPTIONS_PARQUET_MAP[INDEX]),
+                    strategy=strategy
+                )
+                all_trades.extend(trades)
 
-        else:
-            trades, _ = run_multi_day_backtest(
-                dates=[trade_date],
-                index_parquet=str(INDEX_PARQUET_MAP[INDEX]),
-                calendar_csv=str(CALENDAR_CSV_MAP[INDEX]),
-                options_parquet_root=str(OPTIONS_PARQUET_MAP[INDEX]),
-                strategy=strategy,
-                verbose=False
-            )
-            all_trades.extend(trades)
+            else:
+                trades, _ = run_multi_day_backtest(
+                    dates=[trade_date],
+                    index_parquet=str(INDEX_PARQUET_MAP[INDEX]),
+                    calendar_csv=str(CALENDAR_CSV_MAP[INDEX]),
+                    options_parquet_root=str(OPTIONS_PARQUET_MAP[INDEX]),
+                    strategy=strategy,
+                    verbose=False
+                )
+                all_trades.extend(trades)
+
+        except Exception as e:
+            # 🔴 LOG ERROR AND CONTINUE
+            all_errors.append({
+                "DATE": trade_date,
+                "INDEX": INDEX,
+                "STRATEGY": strategy_name,
+                "ERROR": str(e)
+            })
+            continue
 
         if i % BATCH_SIZE == 0:
             clear_cache()
@@ -144,6 +155,11 @@ def main():
     if all_trades:
         pd.DataFrame(all_trades).to_csv(trades_file, index=False)
         print(f"\n✅ Trades saved to {trades_file}")
+
+    if all_errors:
+        pd.DataFrame(all_errors).to_csv(errors_file, index=False)
+        print(f"⚠️ Errors logged to {errors_file}")
+        print(f"   Total errors: {len(all_errors)}")
 
     duration = (datetime.now() - start_time).total_seconds()
     print(f"\n⏱ Runtime: {duration:.2f} seconds")
