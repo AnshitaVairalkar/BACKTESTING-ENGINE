@@ -1,5 +1,5 @@
 DATE,INDEX,STRATEGY,ERROR
-2023-06-23,NIFTY,DynamicATMInventory,No option data for 2023-06-23 | Expiry 2023-06-28
-2023-06-26,NIFTY,DynamicATMInventory,No option data for 2023-06-26 | Expiry 2023-06-28
-2023-06-27,NIFTY,DynamicATMInventory,No option data for 2023-06-27 | Expiry 2023-06-28
-2023-10-05,NIFTY,DynamicATMInventory,single positional indexer is out-of-bounds
+2023-06-23,NIFTY,VolatilityStraddles,No option data for 2023-06-23 | Expiry 2023-06-28
+2023-06-26,NIFTY,VolatilityStraddles,No option data for 2023-06-26 | Expiry 2023-06-28
+2023-06-27,NIFTY,VolatilityStraddles,No option data for 2023-06-27 | Expiry 2023-06-28
+2023-10-05,NIFTY,VolatilityStraddles,single positional indexer is out-of-bounds

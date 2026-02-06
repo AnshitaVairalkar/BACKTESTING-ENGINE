@@ -6,7 +6,9 @@ from data.index_reader import IndexDataStore
 from data.options_reader import clear_cache
 
 from engine.backtest_engine import run_multi_day_backtest
-from engine.event_backtest_engine import run_event_backtest
+from engine.event_backtest_engine import run_event_backtest, run_event_backtest_v2
+
+
 
 # =================================================
 # 🎯 CONFIGURATION
@@ -18,19 +20,26 @@ INDEX = "NIFTY"   # "NIFTY" or "SENSEX"
 # 🔹 STRATEGY SELECTION
 from strategy.itm_straddle import ITMStraddle
 from strategy.dynamic_atm_inventory import DynamicATMInventory
+from strategy.volatility_strangles import VolatilityStrangles
+from strategy.volatility_straddles import VolatilityStraddles
 
+
+# Initialize VolatilityStraddles with path to volatility CSV
+ROOT = Path(__file__).resolve().parent
+VOLATILITY_CSV = ROOT / "data" / "nifty_daily_volatility.csv"  # Adjust path as needed
+
+# strategy = VolatilityStrangles(volatility_csv_path=str(VOLATILITY_CSV))
+strategy= VolatilityStraddles(volatility_csv_path=str(VOLATILITY_CSV))
 # strategy = ITMStraddle()
-strategy = DynamicATMInventory()
+# strategy = DynamicATMInventory()
 
 # 🔹 DATE RANGE
-START_DATE = "2021-06-01"
+START_DATE = "2022-01-01"
 END_DATE   = "2025-12-31"
 
 # =================================================
 # PATHS
 # =================================================
-
-ROOT = Path(__file__).resolve().parent
 
 INDEX_PARQUET_MAP = {
     "SENSEX": ROOT / "../Index Data/SENSEX/SENSEX_IDX.parquet",
@@ -115,14 +124,26 @@ def main():
 
         try:
             if is_event_strategy:
-                trades = run_event_backtest(
-                    trade_date=trade_date,
-                    index=INDEX,
-                    index_parquet_map=INDEX_PARQUET_MAP,
-                    calendar_csv=str(CALENDAR_CSV_MAP[INDEX]),
-                    options_parquet_root=str(OPTIONS_PARQUET_MAP[INDEX]),
-                    strategy=strategy
-                )
+                # Use V2 engine for VolatilityStrangles (CLOSE-based logic)
+                # Use V1 engine for other strategies (OPEN-based logic for backward compatibility)
+                if strategy_name == "VolatilityStrangles" or strategy_name == "VolatilityStraddles":
+                    trades = run_event_backtest_v2(
+                        trade_date=trade_date,
+                        index=INDEX,
+                        index_parquet_map=INDEX_PARQUET_MAP,
+                        calendar_csv=str(CALENDAR_CSV_MAP[INDEX]),
+                        options_parquet_root=str(OPTIONS_PARQUET_MAP[INDEX]),
+                        strategy=strategy
+                    )
+                else:
+                    trades = run_event_backtest(
+                        trade_date=trade_date,
+                        index=INDEX,
+                        index_parquet_map=INDEX_PARQUET_MAP,
+                        calendar_csv=str(CALENDAR_CSV_MAP[INDEX]),
+                        options_parquet_root=str(OPTIONS_PARQUET_MAP[INDEX]),
+                        strategy=strategy
+                    )
                 all_trades.extend(trades)
 
             else:
@@ -144,6 +165,7 @@ def main():
                 "STRATEGY": strategy_name,
                 "ERROR": str(e)
             })
+            print(f"  ⚠️  Error: {e}")
             continue
 
         if i % BATCH_SIZE == 0:
@@ -155,6 +177,7 @@ def main():
     if all_trades:
         pd.DataFrame(all_trades).to_csv(trades_file, index=False)
         print(f"\n✅ Trades saved to {trades_file}")
+        print(f"   Total trades: {len(all_trades)}")
 
     if all_errors:
         pd.DataFrame(all_errors).to_csv(errors_file, index=False)
