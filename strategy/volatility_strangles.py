@@ -165,7 +165,8 @@ class VolatilityStrangles(BaseStrategy):
             "sl_before_round": ce_sl_before_round,
             "volatility": self.volatility,
             "upper": ce_sl_before_round,  # For UPPER_RANGE column
-            "lower": None
+            "lower": None,
+            "R": self.volatility
         })
         
         # PE leg: index_price - volatility
@@ -194,7 +195,8 @@ class VolatilityStrangles(BaseStrategy):
             "sl_before_round": pe_sl_before_round,
             "volatility": self.volatility,
             "upper": None,
-            "lower": pe_sl_before_round  # For LOWER_RANGE column
+            "lower": pe_sl_before_round,  # For LOWER_RANGE column
+            "R": self.volatility
         })
         
         return actions
@@ -237,7 +239,8 @@ class VolatilityStrangles(BaseStrategy):
             "sl_before_round": new_sl_before_round,
             "volatility": self.volatility,
             "upper": new_sl_before_round if opt_type == "CE" else None,
-            "lower": new_sl_before_round if opt_type == "PE" else None
+            "lower": new_sl_before_round if opt_type == "PE" else None,
+            "R": self.volatility
         })
         
         return actions

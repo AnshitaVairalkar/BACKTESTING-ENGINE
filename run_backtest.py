@@ -28,8 +28,8 @@ from strategy.volatility_straddles import VolatilityStraddles
 ROOT = Path(__file__).resolve().parent
 VOLATILITY_CSV = ROOT / "data" / "nifty_daily_volatility.csv"  # Adjust path as needed
 
-# strategy = VolatilityStrangles(volatility_csv_path=str(VOLATILITY_CSV))
-strategy= VolatilityStraddles(volatility_csv_path=str(VOLATILITY_CSV))
+strategy = VolatilityStrangles(volatility_csv_path=str(VOLATILITY_CSV))
+# strategy= VolatilityStraddles(volatility_csv_path=str(VOLATILITY_CSV))
 # strategy = ITMStraddle()
 # strategy = DynamicATMInventory()
 

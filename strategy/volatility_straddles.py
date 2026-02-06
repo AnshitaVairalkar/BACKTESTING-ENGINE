@@ -59,7 +59,7 @@ class VolatilityStraddles(BaseStrategy):
         if self.volatility is None:
             raise ValueError(f"No volatility data for {trade_date}")
         
-        print(f"  📊 Volatility for {trade_date}: {self.volatility:.2f}")
+        # print(f"  📊 Volatility for {trade_date}: {self.volatility:.2f}")
 
     def _get_volatility_for_date(self, trade_date):
         """Get calculated volatility for the trade date"""
@@ -151,7 +151,8 @@ class VolatilityStraddles(BaseStrategy):
             "sl_before_round": ce_sl,
             "volatility": self.volatility,
             "upper": ce_sl,
-            "lower": None
+            "lower": None,
+            "R": self.volatility
         })
         
         # PE leg: SL = index - range
@@ -179,7 +180,8 @@ class VolatilityStraddles(BaseStrategy):
             "sl_before_round": pe_sl,
             "volatility": self.volatility,
             "upper": None,
-            "lower": pe_sl
+            "lower": pe_sl,
+            "R": self.volatility
         })
         
         return actions
@@ -220,7 +222,8 @@ class VolatilityStraddles(BaseStrategy):
             "sl_before_round": new_sl,
             "volatility": self.volatility,
             "upper": new_sl if opt_type == "CE" else None,
-            "lower": new_sl if opt_type == "PE" else None
+            "lower": new_sl if opt_type == "PE" else None,
+            "R": self.volatility
         })
         
         return actions
