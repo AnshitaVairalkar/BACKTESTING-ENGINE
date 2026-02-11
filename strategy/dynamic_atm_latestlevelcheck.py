@@ -3,7 +3,7 @@ from strategy.base_strategy import BaseStrategy
 import itertools
 
 
-class DynamicATMInventory(BaseStrategy):
+class DynamicATMInventoryLatestLevelCheck(BaseStrategy):
 
     ENTRY_TIME = time(9, 20)
     EXIT_TIME = time(15, 20)
@@ -11,40 +11,36 @@ class DynamicATMInventory(BaseStrategy):
 
     expiry_change_date = "2025-08-28"
 
-    before_expirychange = {
-        "FRIDAY": 85.3,
-        "MONDAY": 77.4,
-        "TUESDAY": 128,
-        "WEDNESDAY": 83.8,
-        "THURSDAY": 79.9,
-    }
-
-    after_expirychange = {
-        "WEDNESDAY": 85.3,
-        "THURSDAY": 77.4,
-        "FRIDAY": 128,
-        "MONDAY": 83.8,
-        "TUESDAY": 79.9,
-    }
-
-
     # before_expirychange = {
-    #     "FRIDAY": 100,
-    #     "MONDAY": 100,
-    #     "TUESDAY": 100,
-    #     "WEDNESDAY": 100,
-    #     "THURSDAY": 100,
+    #     "FRIDAY": 85.3,
+    #     "MONDAY": 77.4,
+    #     "TUESDAY": 128,
+    #     "WEDNESDAY": 83.8,
+    #     "THURSDAY": 79.9,
     # }
 
     # after_expirychange = {
-    #     "WEDNESDAY": 100,
-    #     "THURSDAY": 100,
-    #     "FRIDAY": 100,
-    #     "MONDAY": 100,
-    #     "TUESDAY": 100,
+    #     "WEDNESDAY": 85.3,
+    #     "THURSDAY": 77.4,
+    #     "FRIDAY": 128,
+    #     "MONDAY": 83.8,
+    #     "TUESDAY": 79.9,
     # }
+    before_expirychange = {
+        "FRIDAY": 100,
+        "MONDAY": 100,
+        "TUESDAY": 100,
+        "WEDNESDAY": 100,
+        "THURSDAY": 100,
+    }
 
-
+    after_expirychange = {
+        "WEDNESDAY": 100,
+        "THURSDAY": 100,
+        "FRIDAY": 100,
+        "MONDAY": 100,
+        "TUESDAY": 100,
+    }
 
 
 
@@ -82,21 +78,28 @@ class DynamicATMInventory(BaseStrategy):
             return actions
 
         # =================================================
-        # STEP A: CLEANUP (exit ANY breached legs)
+        # STEP A: CLEANUP (exit ONLY latest straddle's breached legs)
         # =================================================
-        exited_legs = []
+        if self.straddles:
+            latest_straddle = self.straddles[-1]
+            latest_straddle_id = latest_straddle["straddle_id"]
+            
+            # Get only the legs belonging to the latest straddle
+            latest_legs = [leg for leg in self.legs if leg["straddle_id"] == latest_straddle_id]
+            
+            exited_legs = []
 
-        for leg in list(self.legs):
-            if leg["type"] == "CE" and index_price > leg["upper"]:
-                actions.append(self._exit_leg(leg, "UPPER_BREACH"))
-                exited_legs.append(leg)
+            for leg in latest_legs:
+                if leg["type"] == "CE" and index_price > leg["upper"]:
+                    actions.append(self._exit_leg(leg, "UPPER_BREACH"))
+                    exited_legs.append(leg)
 
-            elif leg["type"] == "PE" and index_price < leg["lower"]:
-                actions.append(self._exit_leg(leg, "LOWER_BREACH"))
-                exited_legs.append(leg)
+                elif leg["type"] == "PE" and index_price < leg["lower"]:
+                    actions.append(self._exit_leg(leg, "LOWER_BREACH"))
+                    exited_legs.append(leg)
 
-        for leg in exited_legs:
-            self.legs.remove(leg)
+            for leg in exited_legs:
+                self.legs.remove(leg)
 
         # =================================================
         # STEP B: ENTRY DECISION (ONLY latest level)

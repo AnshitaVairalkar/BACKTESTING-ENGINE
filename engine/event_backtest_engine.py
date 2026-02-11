@@ -1,6 +1,74 @@
+"""
+Event Backtest Engine with Safe Candle Handling + Warning Tracking
+
+Fixes:
+- Handles missing candles on ALL days (not just expiry)
+- Safe fallback when exact time not found
+- Returns warnings list for logging to errors file
+- Better error messages for debugging
+"""
+
 from data.index_reader import read_index_data
 from data.market_calendar import get_market_context
 from data.options_reader import load_option_data
+
+
+def _safe_get_candle(opt_df, target_time, fallback="last"):
+    """
+    Safely get a candle at target_time with fallback options.
+    
+    Args:
+        opt_df: DataFrame with DateTime index
+        target_time: datetime.time to look for
+        fallback: "last" = use last available candle
+                  "nearest" = use nearest time
+                  "none" = return None if not found
+    
+    Returns:
+        (candle_series, actual_time, warning_msg) 
+        warning_msg is None if exact match found
+    """
+    # Try exact match first
+    exact_match = opt_df.loc[opt_df.index.time == target_time]
+    
+    if not exact_match.empty:
+        return exact_match.iloc[0], target_time, None  # No warning
+    
+    # Fallback strategies
+    warning_msg = None
+    
+    if fallback == "last":
+        # Get last candle at or before target time
+        before_target = opt_df[opt_df.index.time <= target_time]
+        if not before_target.empty:
+            candle = before_target.iloc[-1]
+            actual_time = candle.name.time()
+            warning_msg = f"Candle {target_time} not found, used {actual_time} (last before target)"
+            return candle, actual_time, warning_msg
+        
+        # Absolute last resort: last candle in data
+        if not opt_df.empty:
+            candle = opt_df.iloc[-1]
+            actual_time = candle.name.time()
+            warning_msg = f"Candle {target_time} not found, used {actual_time} (last available)"
+            return candle, actual_time, warning_msg
+    
+    elif fallback == "nearest":
+        if not opt_df.empty:
+            # Find nearest time
+            time_diffs = opt_df.index.map(
+                lambda x: abs(
+                    (x.hour * 60 + x.minute) - 
+                    (target_time.hour * 60 + target_time.minute)
+                )
+            )
+            nearest_idx = time_diffs.argmin()
+            candle = opt_df.iloc[nearest_idx]
+            actual_time = candle.name.time()
+            warning_msg = f"Candle {target_time} not found, used {actual_time} (nearest)"
+            return candle, actual_time, warning_msg
+    
+    return None, None, f"Candle {target_time} not found and no fallback available"
 
 
 def run_event_backtest(
@@ -12,7 +80,7 @@ def run_event_backtest(
     strategy
 ):
     """
-    ORIGINAL event backtest engine (V1) - for backward compatibility.
+    ORIGINAL event backtest engine (V1) - with SAFE candle handling.
     
     Uses OPEN-based logic:
     - Breach detection on index OPEN
@@ -20,9 +88,18 @@ def run_event_backtest(
     - Re-entries on same candle's OPEN
     - EOD exits on option OPEN
     
-    Used by: DynamicATMInventory and other existing strategies
+    ✅ FIXES:
+    - Safe handling when exact candle time not found (ALL days)
+    - Fallback to last available candle
+    - Returns (trades, warnings) tuple for error logging
+    
+    Returns:
+        tuple: (trades_list, warnings_list)
+        - trades_list: List of trade dictionaries
+        - warnings_list: List of warning dictionaries for missing candles
     """
     trades = []
+    warnings = []  # Track all warnings
 
     # -------------------------------------------------
     # Market context
@@ -68,14 +145,33 @@ def run_event_backtest(
                     option_type=a["type"]
                 )
 
-                candle = opt_df.loc[
-                    opt_df.index.time == candle_time
-                ].iloc[0]
+                # ✅ SAFE: Get candle with fallback
+                candle, actual_time, warning_msg = _safe_get_candle(opt_df, candle_time, fallback="last")
+                
+                if candle is None:
+                    raise ValueError(
+                        f"No candle found for ENTRY: {trade_date} | "
+                        f"{a['type']} {a['strike']} | Time: {candle_time}"
+                    )
+                
+                # Log warning if fallback was used
+                if warning_msg:
+                    warnings.append({
+                        "DATE": trade_date,
+                        "INDEX": index,
+                        "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
+                        "ACTION": "ENTRY",
+                        "STRIKE": a["strike"],
+                        "TYPE": a["type"],
+                        "REQUESTED_TIME": str(candle_time),
+                        "ACTUAL_TIME": str(actual_time),
+                        "WARNING": warning_msg
+                    })
 
                 open_legs[a["leg_id"]] = {
                     "meta": a,
                     "entry_price": candle["Open"],
-                    "entry_time": candle_time
+                    "entry_time": actual_time
                 }
 
             # ================= EXIT =================
@@ -90,9 +186,29 @@ def run_event_backtest(
                     option_type=leg["meta"]["type"]
                 )
 
-                candle = opt_df.loc[
-                    opt_df.index.time == candle_time
-                ].iloc[0]
+                # ✅ SAFE: Get candle with fallback
+                candle, actual_time, warning_msg = _safe_get_candle(opt_df, candle_time, fallback="last")
+                
+                if candle is None:
+                    raise ValueError(
+                        f"No candle found for EXIT: {trade_date} | "
+                        f"{leg['meta']['type']} {leg['meta']['strike']} | Time: {candle_time}"
+                    )
+                
+                # Log warning if fallback was used
+                if warning_msg:
+                    warnings.append({
+                        "DATE": trade_date,
+                        "INDEX": index,
+                        "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
+                        "ACTION": "EXIT",
+                        "STRIKE": leg["meta"]["strike"],
+                        "TYPE": leg["meta"]["type"],
+                        "REQUESTED_TIME": str(candle_time),
+                        "ACTUAL_TIME": str(actual_time),
+                        "WARNING": warning_msg,
+                        "EXIT_REASON": a["reason"]
+                    })
 
                 exit_price = candle["Open"]  # Original: exit on OPEN
                
@@ -111,8 +227,8 @@ def run_event_backtest(
                     "INDEX_PRICE": leg["meta"].get("ref_price", leg["meta"].get("entry_index_price")),
                     "UPPER_RANGE": upper_range,
                     "LOWER_RANGE": lower_range,
-                    "ENTRY_TIME": leg["entry_time"].strftime("%H:%M"),
-                    "EXIT_TIME": candle_time.strftime("%H:%M"),
+                    "ENTRY_TIME": leg["entry_time"].strftime("%H:%M") if hasattr(leg["entry_time"], 'strftime') else str(leg["entry_time"])[:5],
+                    "EXIT_TIME": actual_time.strftime("%H:%M") if hasattr(actual_time, 'strftime') else str(actual_time)[:5],
                     "INDEX_ENTRY": leg["meta"].get("ref_price", leg["meta"].get("entry_index_price")),
                     "INDEX_EXIT": index_price,
                     "STRIKE": leg["meta"]["strike"],
@@ -125,7 +241,7 @@ def run_event_backtest(
                 })
 
     # -------------------------------------------------
-    # 🔒 EOD EXIT — EXACTLY AT EXIT_TIME (OPEN PRICE - original)
+    # 🔒 EOD EXIT — WITH SAFE FALLBACK
     # -------------------------------------------------
     eod_time = strategy.EXIT_TIME
 
@@ -138,9 +254,39 @@ def run_event_backtest(
             option_type=leg["meta"]["type"]
         )
 
-        candle = opt_df.loc[
-            opt_df.index.time == eod_time
-        ].iloc[0]
+        # ✅ SAFE: Get EOD candle with fallback (critical for expiry days)
+        candle, actual_exit_time, warning_msg = _safe_get_candle(opt_df, eod_time, fallback="last")
+        
+        if candle is None:
+            # Log as warning and skip this leg
+            warnings.append({
+                "DATE": trade_date,
+                "INDEX": index,
+                "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
+                "ACTION": "EOD_EXIT",
+                "STRIKE": leg["meta"]["strike"],
+                "TYPE": leg["meta"]["type"],
+                "REQUESTED_TIME": str(eod_time),
+                "ACTUAL_TIME": "N/A",
+                "WARNING": f"No EOD candle found - leg skipped",
+                "EXIT_REASON": "EOD_SKIPPED"
+            })
+            continue
+        
+        # Log warning if fallback was used
+        if warning_msg:
+            warnings.append({
+                "DATE": trade_date,
+                "INDEX": index,
+                "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
+                "ACTION": "EOD_EXIT",
+                "STRIKE": leg["meta"]["strike"],
+                "TYPE": leg["meta"]["type"],
+                "REQUESTED_TIME": str(eod_time),
+                "ACTUAL_TIME": str(actual_exit_time),
+                "WARNING": warning_msg,
+                "EXIT_REASON": "EOD"
+            })
 
         exit_price = candle["Open"]  # Original: EOD exit on OPEN
         pnl = (exit_price - leg["entry_price"]) * -1
@@ -158,8 +304,8 @@ def run_event_backtest(
             "REF_PRICE": leg["meta"].get("ref_price", leg["meta"].get("entry_index_price")),
             "UPPER_RANGE": upper_range,
             "LOWER_RANGE": lower_range,
-            "ENTRY_TIME": leg["entry_time"].strftime("%H:%M"),
-            "EXIT_TIME": eod_time.strftime("%H:%M"),
+            "ENTRY_TIME": leg["entry_time"].strftime("%H:%M") if hasattr(leg["entry_time"], 'strftime') else str(leg["entry_time"])[:5],
+            "EXIT_TIME": actual_exit_time.strftime("%H:%M") if hasattr(actual_exit_time, 'strftime') else str(actual_exit_time)[:5],
             "INDEX_ENTRY": leg["meta"].get("ref_price", leg["meta"].get("entry_index_price")),
             "INDEX_EXIT": None,
             "STRIKE": leg["meta"]["strike"],
@@ -182,11 +328,11 @@ def run_event_backtest(
         )
     )
 
-    return trades
+    return trades, warnings
 
 
 # =================================================
-# V2 ENGINE - NEW CLOSE-BASED LOGIC
+# V2 ENGINE - NEW CLOSE-BASED LOGIC (WITH SAFE HANDLING)
 # =================================================
 
 def run_event_backtest_v2(
@@ -206,10 +352,16 @@ def run_event_backtest_v2(
     - Re-entries on NEXT candle's OPEN (vs same candle)
     - EOD exits on CLOSE (vs OPEN)
     
-    Use this for strategies that need precise CLOSE-based exits.
-    Use run_event_backtest() for backward compatibility.
+    ✅ FIXES:
+    - Safe handling when exact candle time not found (ALL days)
+    - Fallback to last available candle
+    - Returns (trades, warnings) tuple for error logging
+    
+    Returns:
+        tuple: (trades_list, warnings_list)
     """
     trades = []
+    warnings = []
 
     # -------------------------------------------------
     # Market context
@@ -258,14 +410,40 @@ def run_event_backtest_v2(
                 option_type=pending["type"]
             )
 
-            candle = opt_df.loc[
-                opt_df.index.time == candle_time
-            ].iloc[0]
+            # ✅ SAFE: Get candle with fallback
+            candle, actual_time, warning_msg = _safe_get_candle(opt_df, candle_time, fallback="last")
+            
+            if candle is None:
+                warnings.append({
+                    "DATE": trade_date,
+                    "INDEX": index,
+                    "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
+                    "ACTION": "PENDING_ENTRY",
+                    "STRIKE": pending["strike"],
+                    "TYPE": pending["type"],
+                    "REQUESTED_TIME": str(candle_time),
+                    "ACTUAL_TIME": "N/A",
+                    "WARNING": "No candle for pending entry - skipped"
+                })
+                continue
+            
+            if warning_msg:
+                warnings.append({
+                    "DATE": trade_date,
+                    "INDEX": index,
+                    "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
+                    "ACTION": "PENDING_ENTRY",
+                    "STRIKE": pending["strike"],
+                    "TYPE": pending["type"],
+                    "REQUESTED_TIME": str(candle_time),
+                    "ACTUAL_TIME": str(actual_time),
+                    "WARNING": warning_msg
+                })
 
             open_legs[pending["leg_id"]] = {
                 "meta": pending,
                 "entry_price": candle["Open"],  # ENTER ON OPEN
-                "entry_time": candle_time
+                "entry_time": actual_time
             }
 
         pending_entries.clear()
@@ -288,14 +466,32 @@ def run_event_backtest_v2(
                         option_type=a["type"]
                     )
 
-                    candle = opt_df.loc[
-                        opt_df.index.time == candle_time
-                    ].iloc[0]
+                    # ✅ SAFE: Get candle with fallback
+                    candle, actual_time, warning_msg = _safe_get_candle(opt_df, candle_time, fallback="last")
+                    
+                    if candle is None:
+                        raise ValueError(
+                            f"No candle for ENTRY: {trade_date} | "
+                            f"{a['type']} {a['strike']} | Time: {candle_time}"
+                        )
+                    
+                    if warning_msg:
+                        warnings.append({
+                            "DATE": trade_date,
+                            "INDEX": index,
+                            "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
+                            "ACTION": "ENTRY",
+                            "STRIKE": a["strike"],
+                            "TYPE": a["type"],
+                            "REQUESTED_TIME": str(candle_time),
+                            "ACTUAL_TIME": str(actual_time),
+                            "WARNING": warning_msg
+                        })
 
                     open_legs[a["leg_id"]] = {
                         "meta": a,
                         "entry_price": candle["Open"],
-                        "entry_time": candle_time
+                        "entry_time": actual_time
                     }
                 else:
                     # Subsequent entries: enter on NEXT candle's OPEN
@@ -313,9 +509,28 @@ def run_event_backtest_v2(
                     option_type=leg["meta"]["type"]
                 )
 
-                candle = opt_df.loc[
-                    opt_df.index.time == candle_time
-                ].iloc[0]
+                # ✅ SAFE: Get candle with fallback
+                candle, actual_time, warning_msg = _safe_get_candle(opt_df, candle_time, fallback="last")
+                
+                if candle is None:
+                    raise ValueError(
+                        f"No candle for EXIT: {trade_date} | "
+                        f"{leg['meta']['type']} {leg['meta']['strike']} | Time: {candle_time}"
+                    )
+                
+                if warning_msg:
+                    warnings.append({
+                        "DATE": trade_date,
+                        "INDEX": index,
+                        "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
+                        "ACTION": "EXIT",
+                        "STRIKE": leg["meta"]["strike"],
+                        "TYPE": leg["meta"]["type"],
+                        "REQUESTED_TIME": str(candle_time),
+                        "ACTUAL_TIME": str(actual_time),
+                        "WARNING": warning_msg,
+                        "EXIT_REASON": a["reason"]
+                    })
 
                 # EXIT ON CLOSE (when breach detected)
                 exit_price = candle["Close"]
@@ -344,12 +559,12 @@ def run_event_backtest_v2(
                     "DAY": market["day"],
                     
                     # Entry info
-                    "ENTRY_TIME": leg["entry_time"].strftime("%H:%M"),
+                    "ENTRY_TIME": leg["entry_time"].strftime("%H:%M") if hasattr(leg["entry_time"], 'strftime') else str(leg["entry_time"])[:5],
                     "INDEX_ENTRY_PRICE": entry_index_price if entry_index_price is not None else ref_price,
                     "ENTRY_PRICE": leg["entry_price"],
                     
                     # Exit info
-                    "EXIT_TIME": candle_time.strftime("%H:%M"),
+                    "EXIT_TIME": actual_time.strftime("%H:%M") if hasattr(actual_time, 'strftime') else str(actual_time)[:5],
                     "INDEX_EXIT_PRICE": index_price,  # Index CLOSE when SL hit
                     "EXIT_PRICE": exit_price,  # Option CLOSE
                     "EXIT_REASON": a["reason"],
@@ -374,7 +589,7 @@ def run_event_backtest_v2(
                 })
 
     # -------------------------------------------------
-    # 🔒 EOD EXIT — EXACTLY AT EXIT_TIME (CLOSE PRICE)
+    # 🔒 EOD EXIT — WITH SAFE FALLBACK (CLOSE PRICE)
     # -------------------------------------------------
     eod_time = strategy.EXIT_TIME
 
@@ -387,9 +602,37 @@ def run_event_backtest_v2(
             option_type=leg["meta"]["type"]
         )
 
-        candle = opt_df.loc[
-            opt_df.index.time == eod_time
-        ].iloc[0]
+        # ✅ SAFE: Get EOD candle with fallback
+        candle, actual_exit_time, warning_msg = _safe_get_candle(opt_df, eod_time, fallback="last")
+        
+        if candle is None:
+            warnings.append({
+                "DATE": trade_date,
+                "INDEX": index,
+                "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
+                "ACTION": "EOD_EXIT",
+                "STRIKE": leg["meta"]["strike"],
+                "TYPE": leg["meta"]["type"],
+                "REQUESTED_TIME": str(eod_time),
+                "ACTUAL_TIME": "N/A",
+                "WARNING": "No EOD candle found - leg skipped",
+                "EXIT_REASON": "EOD_SKIPPED"
+            })
+            continue
+        
+        if warning_msg:
+            warnings.append({
+                "DATE": trade_date,
+                "INDEX": index,
+                "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
+                "ACTION": "EOD_EXIT",
+                "STRIKE": leg["meta"]["strike"],
+                "TYPE": leg["meta"]["type"],
+                "REQUESTED_TIME": str(eod_time),
+                "ACTUAL_TIME": str(actual_exit_time),
+                "WARNING": warning_msg,
+                "EXIT_REASON": "EOD"
+            })
 
         exit_price = candle["Close"]  # EOD exit on CLOSE
         pnl = (exit_price - leg["entry_price"]) * -1
@@ -407,7 +650,11 @@ def run_event_backtest_v2(
 
         # Get EOD index price (close)
         eod_index_row = index_df.loc[index_df.index.time == eod_time]
-        eod_index_price = eod_index_row.iloc[0]["Close"] if not eod_index_row.empty else None
+        if not eod_index_row.empty:
+            eod_index_price = eod_index_row.iloc[0]["Close"]
+        else:
+            # Fallback: get last available index price
+            eod_index_price = index_df.iloc[-1]["Close"] if not index_df.empty else None
 
         trades.append({
             "DATE": trade_date,
@@ -416,12 +663,12 @@ def run_event_backtest_v2(
             "DAY": market["day"],
             
             # Entry info
-            "ENTRY_TIME": leg["entry_time"].strftime("%H:%M"),
+            "ENTRY_TIME": leg["entry_time"].strftime("%H:%M") if hasattr(leg["entry_time"], 'strftime') else str(leg["entry_time"])[:5],
             "INDEX_ENTRY_PRICE": entry_index_price if entry_index_price is not None else ref_price,
             "ENTRY_PRICE": leg["entry_price"],
             
             # Exit info
-            "EXIT_TIME": eod_time.strftime("%H:%M"),
+            "EXIT_TIME": actual_exit_time.strftime("%H:%M") if hasattr(actual_exit_time, 'strftime') else str(actual_exit_time)[:5],
             "INDEX_EXIT_PRICE": eod_index_price,
             "EXIT_PRICE": exit_price,
             "EXIT_REASON": "EOD",
@@ -456,4 +703,4 @@ def run_event_backtest_v2(
         )
     )
 
-    return trades
+    return trades, warnings

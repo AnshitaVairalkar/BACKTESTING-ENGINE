@@ -22,19 +22,20 @@ from strategy.itm_straddle import ITMStraddle
 from strategy.dynamic_atm_inventory import DynamicATMInventory
 from strategy.volatility_strangles import VolatilityStrangles
 from strategy.volatility_straddles import VolatilityStraddles
-
+from strategy.dynamic_atm_latestlevelcheck import DynamicATMInventoryLatestLevelCheck
 
 # Initialize VolatilityStraddles with path to volatility CSV
 ROOT = Path(__file__).resolve().parent
 VOLATILITY_CSV = ROOT / "data" / "nifty_daily_volatility.csv"  # Adjust path as needed
 
-strategy = VolatilityStrangles(volatility_csv_path=str(VOLATILITY_CSV))
+# strategy = VolatilityStrangles(volatility_csv_path=str(VOLATILITY_CSV))
 # strategy= VolatilityStraddles(volatility_csv_path=str(VOLATILITY_CSV))
 # strategy = ITMStraddle()
-# strategy = DynamicATMInventory()
+strategy = DynamicATMInventory()
+# strategy = DynamicATMInventoryLatestLevelCheck()
 
 # 🔹 DATE RANGE
-START_DATE = "2022-01-01"
+START_DATE = "2021-06-01"
 END_DATE   = "2025-12-31"
 
 # =================================================
@@ -101,10 +102,10 @@ def main():
     # -------------------------------------------------
     date_suffix = f"{START_DATE}_{END_DATE}".replace("-", "")
     trades_file = OUTPUT_DIR / f"{INDEX.lower()}_{strategy_name.lower()}_{date_suffix}.csv"
-    errors_file = OUTPUT_DIR / "errors.csv"
+    issues_file = OUTPUT_DIR / f"{INDEX.lower()}_{strategy_name.lower()}_issues_{date_suffix}.csv"  # ✅ Combined errors + warnings
 
     all_trades = []
-    all_errors = []
+    all_issues = []  # ✅ Combined list for errors and warnings
 
     # =================================================
     # ENGINE MODE
@@ -120,14 +121,14 @@ def main():
     # RUN BACKTEST
     # =================================================
     for i, trade_date in enumerate(trading_dates, 1):
-        print(f"[{i}/{len(trading_dates)}] {trade_date}")
+        print(f"[{i}/{len(trading_dates)}] {trade_date}", end="")
 
         try:
             if is_event_strategy:
                 # Use V2 engine for VolatilityStrangles (CLOSE-based logic)
                 # Use V1 engine for other strategies (OPEN-based logic for backward compatibility)
                 if strategy_name == "VolatilityStrangles" or strategy_name == "VolatilityStraddles":
-                    trades = run_event_backtest_v2(
+                    trades, warnings = run_event_backtest_v2(
                         trade_date=trade_date,
                         index=INDEX,
                         index_parquet_map=INDEX_PARQUET_MAP,
@@ -136,7 +137,7 @@ def main():
                         strategy=strategy
                     )
                 else:
-                    trades = run_event_backtest(
+                    trades, warnings = run_event_backtest(
                         trade_date=trade_date,
                         index=INDEX,
                         index_parquet_map=INDEX_PARQUET_MAP,
@@ -144,7 +145,28 @@ def main():
                         options_parquet_root=str(OPTIONS_PARQUET_MAP[INDEX]),
                         strategy=strategy
                     )
+                
                 all_trades.extend(trades)
+                
+                # ✅ Add warnings to issues with TYPE = WARNING
+                if warnings:
+                    for w in warnings:
+                        all_issues.append({
+                            "DATE": w.get("DATE"),
+                            "INDEX": w.get("INDEX"),
+                            "STRATEGY": strategy_name,
+                            "TYPE": "WARNING",
+                            "ACTION": w.get("ACTION"),
+                            "EXPIRY": w.get("EXPIRY"),
+                            "STRIKE": w.get("STRIKE"),
+                            "OPT_TYPE": w.get("TYPE"),
+                            "REQUESTED_TIME": w.get("REQUESTED_TIME"),
+                            "ACTUAL_TIME": w.get("ACTUAL_TIME"),
+                            "MESSAGE": w.get("WARNING"),
+                        })
+                    print(f" ⚠️ {len(warnings)} warning(s)")
+                else:
+                    print(" ✓")
 
             else:
                 trades, _ = run_multi_day_backtest(
@@ -156,16 +178,24 @@ def main():
                     verbose=False
                 )
                 all_trades.extend(trades)
+                print(" ✓")
 
         except Exception as e:
-            # 🔴 LOG ERROR AND CONTINUE
-            all_errors.append({
+            # 🔴 LOG ERROR with TYPE = ERROR
+            all_issues.append({
                 "DATE": trade_date,
                 "INDEX": INDEX,
                 "STRATEGY": strategy_name,
-                "ERROR": str(e)
+                "TYPE": "ERROR",
+                "ACTION": None,
+                "EXPIRY": None,
+                "STRIKE": None,
+                "OPT_TYPE": None,
+                "REQUESTED_TIME": None,
+                "ACTUAL_TIME": None,
+                "MESSAGE": str(e),
             })
-            print(f"  ⚠️  Error: {e}")
+            print(f" ❌ Error: {e}")
             continue
 
         if i % BATCH_SIZE == 0:
@@ -179,10 +209,25 @@ def main():
         print(f"\n✅ Trades saved to {trades_file}")
         print(f"   Total trades: {len(all_trades)}")
 
-    if all_errors:
-        pd.DataFrame(all_errors).to_csv(errors_file, index=False)
-        print(f"⚠️ Errors logged to {errors_file}")
-        print(f"   Total errors: {len(all_errors)}")
+    # ✅ Save combined issues file
+    if all_issues:
+        issues_df = pd.DataFrame(all_issues)
+        issues_df.to_csv(issues_file, index=False)
+        print(f"\n📋 Issues logged to {issues_file}")
+        
+        # Count by type
+        error_count = len(issues_df[issues_df["TYPE"] == "ERROR"])
+        warning_count = len(issues_df[issues_df["TYPE"] == "WARNING"])
+        
+        print(f"   ❌ Errors: {error_count}")
+        print(f"   ⚠️ Warnings: {warning_count}")
+        
+        # Summary by action type for warnings
+        if warning_count > 0:
+            print("\n   Warning Summary by Action:")
+            warning_summary = issues_df[issues_df["TYPE"] == "WARNING"].groupby("ACTION").size()
+            for action, count in warning_summary.items():
+                print(f"      {action}: {count}")
 
     duration = (datetime.now() - start_time).total_seconds()
     print(f"\n⏱ Runtime: {duration:.2f} seconds")
