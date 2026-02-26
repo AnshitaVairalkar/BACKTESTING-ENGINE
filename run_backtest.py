@@ -4,7 +4,8 @@ from datetime import datetime
 from data.index_reader import IndexDataStore
 from data.options_reader import clear_cache
 from engine.backtest_engine import run_multi_day_backtest
-from engine.event_backtest_engine import run_event_backtest, run_event_backtest_v2
+from engine.event_backtest_engine import run_event_backtest_v2
+from analytics.minute_pnl_tracker import MinutePnLTracker
 
 
 
@@ -33,7 +34,7 @@ strategy = VolatilityStrangles(volatility_csv_path=str(VOLATILITY_CSV))
 # strategy = DynamicATMInventoryLatestLevelCheck()
 
 # 🔹 DATE RANGE
-START_DATE = "2021-06-01"
+START_DATE = "2022-01-01"
 END_DATE   = "2025-12-31"
 
 # =================================================
@@ -115,6 +116,10 @@ def main():
         "EVENT-DRIVEN" if is_event_strategy else "LEG-BASED"
     )
 
+    # 1-min PnL tracker filename: e.g. nifty_volatilitystrangles_20210601_20251231
+    pnl_filename = f"{INDEX.lower()}_{strategy_name.lower()}_{START_DATE.replace('-', '')}_{END_DATE.replace('-', '')}"
+    minute_pnl_tracker = MinutePnLTracker(pnl_filename, OUTPUT_DIR) if is_event_strategy else None
+
     # =================================================
     # RUN BACKTEST
     # =================================================
@@ -125,23 +130,14 @@ def main():
             if is_event_strategy:
                 # Use V2 engine for VolatilityStrangles (CLOSE-based logic)
                 # Use V1 engine for other strategies (OPEN-based logic for backward compatibility)
-                if strategy_name == "VolatilityStrangles" or strategy_name == "VolatilityStraddles":
-                    trades, warnings = run_event_backtest_v2(
+                trades, warnings = run_event_backtest_v2(
                         trade_date=trade_date,
                         index=INDEX,
                         index_parquet_map=INDEX_PARQUET_MAP,
                         calendar_csv=str(CALENDAR_CSV_MAP[INDEX]),
                         options_parquet_root=str(OPTIONS_PARQUET_MAP[INDEX]),
-                        strategy=strategy
-                    )
-                else:
-                    trades, warnings = run_event_backtest(
-                        trade_date=trade_date,
-                        index=INDEX,
-                        index_parquet_map=INDEX_PARQUET_MAP,
-                        calendar_csv=str(CALENDAR_CSV_MAP[INDEX]),
-                        options_parquet_root=str(OPTIONS_PARQUET_MAP[INDEX]),
-                        strategy=strategy
+                        strategy=strategy,
+                        minute_pnl_tracker=minute_pnl_tracker
                     )
                 
                 all_trades.extend(trades)
@@ -202,6 +198,9 @@ def main():
     # -------------------------------------------------
     # SAVE RESULTS
     # -------------------------------------------------
+    if minute_pnl_tracker is not None:
+        minute_pnl_tracker.save()
+
     if all_trades:
         pd.DataFrame(all_trades).to_csv(trades_file, index=False)
         print(f"\n✅ Trades saved to {trades_file}")

@@ -8,9 +8,12 @@ Fixes:
 - Better error messages for debugging
 """
 
+from pathlib import Path
+from datetime import datetime, timedelta
 from data.index_reader import read_index_data
 from data.market_calendar import get_market_context
 from data.options_reader import load_option_data
+from analytics.minute_pnl_tracker import MinutePnLTracker
 
 
 def _safe_get_candle(opt_df, target_time, fallback="last"):
@@ -71,277 +74,14 @@ def _safe_get_candle(opt_df, target_time, fallback="last"):
     return None, None, f"Candle {target_time} not found and no fallback available"
 
 
-def run_event_backtest(
-    trade_date: str,
-    index: str,
-    index_parquet_map: dict,
-    calendar_csv: str,
-    options_parquet_root: str,
-    strategy
-):
-    """
-    ORIGINAL event backtest engine (V1) - with SAFE candle handling.
-    
-    Uses OPEN-based logic:
-    - Breach detection on index OPEN
-    - Exits on option OPEN
-    - Re-entries on same candle's OPEN
-    - EOD exits on option OPEN
-    
-    ✅ FIXES:
-    - Safe handling when exact candle time not found (ALL days)
-    - Fallback to last available candle
-    - Returns (trades, warnings) tuple for error logging
-    
-    Returns:
-        tuple: (trades_list, warnings_list)
-        - trades_list: List of trade dictionaries
-        - warnings_list: List of warning dictionaries for missing candles
-    """
-    trades = []
-    warnings = []  # Track all warnings
-
-    # -------------------------------------------------
-    # Market context
-    # -------------------------------------------------
-    market = get_market_context(calendar_csv, trade_date)
-
-    index_df = read_index_data(
-        index_parquet_map[index],
-        trade_date
-    )
-
-    strategy.on_day_start(
-        trade_date=trade_date,
-        index=index,
-        market_context=market
-    )
-
-    open_legs = {}
-
-    # -------------------------------------------------
-    # INTRADAY LOOP (STRICTLY < EXIT_TIME)
-    # -------------------------------------------------
-    for ts, row in index_df.iterrows():
-        candle_time = ts.time()
-
-        if candle_time >= strategy.EXIT_TIME:
-            break
-
-        # 🔑 INDEX PRICE = OPEN (original behavior)
-        index_price = row["Open"]
-
-        actions = strategy.on_minute(ts, index_price)
-
-        for a in actions:
-
-            # ================= ENTRY =================
-            if a["action"] == "ENTER":
-                opt_df = load_option_data(
-                    parquet_root=options_parquet_root,
-                    trade_date=trade_date,
-                    expiry=market["weekly_expiry"],
-                    strike=a["strike"],
-                    option_type=a["type"]
-                )
-
-                # ✅ SAFE: Get candle with fallback
-                candle, actual_time, warning_msg = _safe_get_candle(opt_df, candle_time, fallback="last")
-                
-                if candle is None:
-                    raise ValueError(
-                        f"No candle found for ENTRY: {trade_date} | "
-                        f"{a['type']} {a['strike']} | Time: {candle_time}"
-                    )
-                
-                # Log warning if fallback was used
-                if warning_msg:
-                    warnings.append({
-                        "DATE": trade_date,
-                        "INDEX": index,
-                        "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
-                        "ACTION": "ENTRY",
-                        "STRIKE": a["strike"],
-                        "TYPE": a["type"],
-                        "REQUESTED_TIME": str(candle_time),
-                        "ACTUAL_TIME": str(actual_time),
-                        "WARNING": warning_msg
-                    })
-
-                open_legs[a["leg_id"]] = {
-                    "meta": a,
-                    "entry_price": candle["Open"],
-                    "entry_time": actual_time
-                }
-
-            # ================= EXIT =================
-            elif a["action"] == "EXIT":
-                leg = open_legs.pop(a["leg_id"])
-
-                opt_df = load_option_data(
-                    parquet_root=options_parquet_root,
-                    trade_date=trade_date,
-                    expiry=market["weekly_expiry"],
-                    strike=leg["meta"]["strike"],
-                    option_type=leg["meta"]["type"]
-                )
-
-                # ✅ SAFE: Get candle with fallback
-                candle, actual_time, warning_msg = _safe_get_candle(opt_df, candle_time, fallback="last")
-                
-                if candle is None:
-                    raise ValueError(
-                        f"No candle found for EXIT: {trade_date} | "
-                        f"{leg['meta']['type']} {leg['meta']['strike']} | Time: {candle_time}"
-                    )
-                
-                # Log warning if fallback was used
-                if warning_msg:
-                    warnings.append({
-                        "DATE": trade_date,
-                        "INDEX": index,
-                        "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
-                        "ACTION": "EXIT",
-                        "STRIKE": leg["meta"]["strike"],
-                        "TYPE": leg["meta"]["type"],
-                        "REQUESTED_TIME": str(candle_time),
-                        "ACTUAL_TIME": str(actual_time),
-                        "WARNING": warning_msg,
-                        "EXIT_REASON": a["reason"]
-                    })
-
-                exit_price = candle["Open"]  # Original: exit on OPEN
-               
-                pnl = (exit_price - leg["entry_price"]) * -1
-
-                # 🔍 RANGE MASKING FOR TRADESHEET (original format)
-                upper_range = leg["meta"].get("upper") if leg["meta"]["type"] == "CE" else None
-                lower_range = leg["meta"].get("lower") if leg["meta"]["type"] == "PE" else None
-
-                trades.append({
-                    "DATE": trade_date,
-                    "INDEX": index,
-                    "EXPIRYDATE": market["weekly_expiry"].strftime("%Y-%m-%d"),
-                    "DAY": market["day"],
-                    "RANGE_USED": leg["meta"].get("R"),
-                    "INDEX_PRICE": leg["meta"].get("ref_price", leg["meta"].get("entry_index_price")),
-                    "UPPER_RANGE": upper_range,
-                    "LOWER_RANGE": lower_range,
-                    "ENTRY_TIME": leg["entry_time"].strftime("%H:%M") if hasattr(leg["entry_time"], 'strftime') else str(leg["entry_time"])[:5],
-                    "EXIT_TIME": actual_time.strftime("%H:%M") if hasattr(actual_time, 'strftime') else str(actual_time)[:5],
-                    "INDEX_ENTRY": leg["meta"].get("ref_price", leg["meta"].get("entry_index_price")),
-                    "INDEX_EXIT": index_price,
-                    "STRIKE": leg["meta"]["strike"],
-                    "TYPE": leg["meta"]["type"],
-                    "ENTRY_PRICE": leg["entry_price"],
-                    "EXIT_PRICE": exit_price,
-                    "QTY": -1,
-                    "PNL": pnl,
-                    "EXIT_REASON": a["reason"],
-                })
-
-    # -------------------------------------------------
-    # 🔒 EOD EXIT — WITH SAFE FALLBACK
-    # -------------------------------------------------
-    eod_time = strategy.EXIT_TIME
-
-    for leg_id, leg in open_legs.items():
-        opt_df = load_option_data(
-            parquet_root=options_parquet_root,
-            trade_date=trade_date,
-            expiry=market["weekly_expiry"],
-            strike=leg["meta"]["strike"],
-            option_type=leg["meta"]["type"]
-        )
-
-        # ✅ SAFE: Get EOD candle with fallback (critical for expiry days)
-        candle, actual_exit_time, warning_msg = _safe_get_candle(opt_df, eod_time, fallback="last")
-        
-        if candle is None:
-            # Log as warning and skip this leg
-            warnings.append({
-                "DATE": trade_date,
-                "INDEX": index,
-                "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
-                "ACTION": "EOD_EXIT",
-                "STRIKE": leg["meta"]["strike"],
-                "TYPE": leg["meta"]["type"],
-                "REQUESTED_TIME": str(eod_time),
-                "ACTUAL_TIME": "N/A",
-                "WARNING": f"No EOD candle found - leg skipped",
-                "EXIT_REASON": "EOD_SKIPPED"
-            })
-            continue
-        
-        # Log warning if fallback was used
-        if warning_msg:
-            warnings.append({
-                "DATE": trade_date,
-                "INDEX": index,
-                "EXPIRY": market["weekly_expiry"].strftime("%Y-%m-%d"),
-                "ACTION": "EOD_EXIT",
-                "STRIKE": leg["meta"]["strike"],
-                "TYPE": leg["meta"]["type"],
-                "REQUESTED_TIME": str(eod_time),
-                "ACTUAL_TIME": str(actual_exit_time),
-                "WARNING": warning_msg,
-                "EXIT_REASON": "EOD"
-            })
-
-        exit_price = candle["Open"]  # Original: EOD exit on OPEN
-        pnl = (exit_price - leg["entry_price"]) * -1
-
-        # 🔍 RANGE MASKING FOR TRADESHEET
-        upper_range = leg["meta"].get("upper") if leg["meta"]["type"] == "CE" else None
-        lower_range = leg["meta"].get("lower") if leg["meta"]["type"] == "PE" else None
-
-        trades.append({
-            "DATE": trade_date,
-            "INDEX": index,
-            "EXPIRYDATE": market["weekly_expiry"].strftime("%Y-%m-%d"),
-            "DAY": market["day"],
-            "RANGE_USED": leg["meta"].get("R"),
-            "REF_PRICE": leg["meta"].get("ref_price", leg["meta"].get("entry_index_price")),
-            "UPPER_RANGE": upper_range,
-            "LOWER_RANGE": lower_range,
-            "ENTRY_TIME": leg["entry_time"].strftime("%H:%M") if hasattr(leg["entry_time"], 'strftime') else str(leg["entry_time"])[:5],
-            "EXIT_TIME": actual_exit_time.strftime("%H:%M") if hasattr(actual_exit_time, 'strftime') else str(actual_exit_time)[:5],
-            "INDEX_ENTRY": leg["meta"].get("ref_price", leg["meta"].get("entry_index_price")),
-            "INDEX_EXIT": None,
-            "STRIKE": leg["meta"]["strike"],
-            "TYPE": leg["meta"]["type"],
-            "ENTRY_PRICE": leg["entry_price"],
-            "EXIT_PRICE": exit_price,
-            "QTY": -1,
-            "PNL": pnl,
-            "EXIT_REASON": "EOD",
-        })
-
-    # -------------------------------------------------
-    # SORT TRADES: DATE → ENTRY_TIME → TYPE
-    # -------------------------------------------------
-    trades.sort(
-        key=lambda x: (
-            x["DATE"],
-            x["ENTRY_TIME"],
-            x["TYPE"]
-        )
-    )
-
-    return trades, warnings
-
-
-# =================================================
-# V2 ENGINE - NEW CLOSE-BASED LOGIC (WITH SAFE HANDLING)
-# =================================================
-
 def run_event_backtest_v2(
     trade_date: str,
     index: str,
     index_parquet_map: dict,
     calendar_csv: str,
     options_parquet_root: str,
-    strategy
+    strategy,
+    minute_pnl_tracker: "MinutePnLTracker" = None
 ):
     """
     Version 2 of event backtest engine with improved entry/exit logic.
@@ -379,6 +119,9 @@ def run_event_backtest_v2(
         market_context=market
     )
 
+
+    if minute_pnl_tracker is not None:
+        minute_pnl_tracker.new_day(trade_date, strategy.get_strategy_name())
     open_legs = {}
     pending_entries = []  # Entries that should happen on NEXT candle's OPEN
 
@@ -443,7 +186,8 @@ def run_event_backtest_v2(
             open_legs[pending["leg_id"]] = {
                 "meta": pending,
                 "entry_price": candle["Open"],  # ENTER ON OPEN
-                "entry_time": actual_time
+                "entry_time": actual_time,
+                "opt_df": opt_df  # cached — avoids reload in tracker
             }
 
         pending_entries.clear()
@@ -491,7 +235,8 @@ def run_event_backtest_v2(
                     open_legs[a["leg_id"]] = {
                         "meta": a,
                         "entry_price": candle["Open"],
-                        "entry_time": actual_time
+                        "entry_time": actual_time,
+                        "opt_df": opt_df  # cached — avoids reload in tracker
                     }
                 else:
                     # Subsequent entries: enter on NEXT candle's OPEN
@@ -537,6 +282,9 @@ def run_event_backtest_v2(
                
                 pnl = (exit_price - leg["entry_price"]) * -1
                 
+
+                if minute_pnl_tracker is not None:
+                    minute_pnl_tracker.add_realized(pnl)
                 # Extract metadata for tradesheet
                 meta = leg["meta"]
                 
@@ -588,10 +336,22 @@ def run_event_backtest_v2(
                     "PNL": pnl,
                 })
 
+        # ================= 1-MIN PNL SNAPSHOT =================
+        if minute_pnl_tracker is not None and open_legs:
+            minute_pnl_tracker.record(
+                ts=ts,
+                trade_date=trade_date,
+                open_legs=open_legs,
+                market=market,
+                expiry_date=market["weekly_expiry"].date()
+            )
+
     # -------------------------------------------------
     # 🔒 EOD EXIT — WITH SAFE FALLBACK (CLOSE PRICE)
+    # Uses EXIT_TIME - 1min so tradesheet PnL matches 1min PnL tracker
     # -------------------------------------------------
-    eod_time = strategy.EXIT_TIME
+    _exit_dt = datetime.combine(datetime.today(), strategy.EXIT_TIME) - timedelta(minutes=1)
+    eod_time = _exit_dt.time()
 
     for leg_id, leg in open_legs.items():
         opt_df = load_option_data(
@@ -637,6 +397,9 @@ def run_event_backtest_v2(
         exit_price = candle["Close"]  # EOD exit on CLOSE
         pnl = (exit_price - leg["entry_price"]) * -1
 
+
+        if minute_pnl_tracker is not None:
+            minute_pnl_tracker.add_realized(pnl)
         # Extract metadata
         meta = leg["meta"]
         sl_before_round = meta.get("sl_before_round", None)
