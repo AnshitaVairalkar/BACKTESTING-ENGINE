@@ -10,7 +10,25 @@ class DynamicATMInventory(BaseStrategy):
     STRIKE_GAP = 50
 
     expiry_change_date = "2025-08-28"
+    # nifty points
+    before_expirychange = {
+        "FRIDAY": 85.3,
+        "MONDAY": 77.4,
+        "TUESDAY": 128,
+        "WEDNESDAY": 83.8,
+        "THURSDAY": 79.9,
+    }
 
+    after_expirychange = {
+        "WEDNESDAY": 85.3,
+        "THURSDAY": 77.4,
+        "FRIDAY": 128,
+        "MONDAY": 83.8,
+        "TUESDAY": 79.9,
+    }
+
+
+    # sensex points
     before_expirychange = {
         "FRIDAY": 85.3,
         "MONDAY": 77.4,

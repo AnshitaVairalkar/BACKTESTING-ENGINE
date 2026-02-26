@@ -1,23 +1,21 @@
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
-
 from data.index_reader import IndexDataStore
 from data.options_reader import clear_cache
-
 from engine.backtest_engine import run_multi_day_backtest
 from engine.event_backtest_engine import run_event_backtest, run_event_backtest_v2
 
 
 
 # =================================================
-# 🎯 CONFIGURATION
+#  CONFIGURATION
 # =================================================
 
-# 🔹 INDEX SELECTION
+#  INDEX SELECTION
 INDEX = "NIFTY"   # "NIFTY" or "SENSEX"
 
-# 🔹 STRATEGY SELECTION
+#  STRATEGY SELECTION
 from strategy.itm_straddle import ITMStraddle
 from strategy.dynamic_atm_inventory import DynamicATMInventory
 from strategy.volatility_strangles import VolatilityStrangles
@@ -28,10 +26,10 @@ from strategy.dynamic_atm_latestlevelcheck import DynamicATMInventoryLatestLevel
 ROOT = Path(__file__).resolve().parent
 VOLATILITY_CSV = ROOT / "data" / "nifty_daily_volatility.csv"  # Adjust path as needed
 
-# strategy = VolatilityStrangles(volatility_csv_path=str(VOLATILITY_CSV))
+strategy = VolatilityStrangles(volatility_csv_path=str(VOLATILITY_CSV))
 # strategy= VolatilityStraddles(volatility_csv_path=str(VOLATILITY_CSV))
 # strategy = ITMStraddle()
-strategy = DynamicATMInventory()
+# strategy = DynamicATMInventory()
 # strategy = DynamicATMInventoryLatestLevelCheck()
 
 # 🔹 DATE RANGE

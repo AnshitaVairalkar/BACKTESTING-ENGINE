@@ -65,8 +65,7 @@ class VolatilityStrangles(BaseStrategy):
         
         if self.volatility is None:
             raise ValueError(f"No volatility data for {trade_date}")
-        
-        print(f"  📊 Volatility for {trade_date}: {self.volatility:.2f}")
+
 
     def _get_volatility_for_date(self, trade_date):
         """
