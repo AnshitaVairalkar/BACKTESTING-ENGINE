@@ -22,16 +22,20 @@ from strategy.dynamic_atm_inventory import DynamicATMInventory
 from strategy.volatility_strangles import VolatilityStrangles
 from strategy.volatility_straddles import VolatilityStraddles
 from strategy.dynamic_atm_latestlevelcheck import DynamicATMInventoryLatestLevelCheck
+from strategy.dynamic_atm_100_range import DynamicATM100Range
+from strategy.dynamic_atm_lastlevelcheck_100_range import DynamicATMLatestLevelCheck100Range
 
 # Initialize VolatilityStraddles with path to volatility CSV
 ROOT = Path(__file__).resolve().parent
-VOLATILITY_CSV = ROOT / "data" / "nifty_daily_volatility.csv"  # Adjust path as needed
+# VOLATILITY_CSV = ROOT / "data" / "nifty_daily_volatility.csv"  # Adjust path as needed
 
-strategy = VolatilityStrangles(volatility_csv_path=str(VOLATILITY_CSV))
+# strategy = VolatilityStrangles(volatility_csv_path=str(VOLATILITY_CSV))
 # strategy= VolatilityStraddles(volatility_csv_path=str(VOLATILITY_CSV))
 # strategy = ITMStraddle()
 # strategy = DynamicATMInventory()
 # strategy = DynamicATMInventoryLatestLevelCheck()
+# strategy = DynamicATM100Range()
+strategy = DynamicATMLatestLevelCheck100Range()
 
 # 🔹 DATE RANGE
 START_DATE = "2022-01-01"

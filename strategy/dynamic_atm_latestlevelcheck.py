@@ -11,37 +11,21 @@ class DynamicATMInventoryLatestLevelCheck(BaseStrategy):
 
     expiry_change_date = "2025-08-28"
 
-    # before_expirychange = {
-    #     "FRIDAY": 85.3,
-    #     "MONDAY": 77.4,
-    #     "TUESDAY": 128,
-    #     "WEDNESDAY": 83.8,
-    #     "THURSDAY": 79.9,
-    # }
-
-    # after_expirychange = {
-    #     "WEDNESDAY": 85.3,
-    #     "THURSDAY": 77.4,
-    #     "FRIDAY": 128,
-    #     "MONDAY": 83.8,
-    #     "TUESDAY": 79.9,
-    # }
     before_expirychange = {
-        "FRIDAY": 100,
-        "MONDAY": 100,
-        "TUESDAY": 100,
-        "WEDNESDAY": 100,
-        "THURSDAY": 100,
+        "FRIDAY": 85.3,
+        "MONDAY": 77.4,
+        "TUESDAY": 128,
+        "WEDNESDAY": 83.8,
+        "THURSDAY": 79.9,
     }
 
     after_expirychange = {
-        "WEDNESDAY": 100,
-        "THURSDAY": 100,
-        "FRIDAY": 100,
-        "MONDAY": 100,
-        "TUESDAY": 100,
+        "WEDNESDAY": 85.3,
+        "THURSDAY": 77.4,
+        "FRIDAY": 128,
+        "MONDAY": 83.8,
+        "TUESDAY": 79.9,
     }
-
 
 
     # Required by BaseStrategy
